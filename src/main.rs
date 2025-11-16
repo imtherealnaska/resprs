@@ -1,6 +1,7 @@
 use tokio::io::BufReader;
 
 mod parser;
+pub mod serializer;
 mod resp_frame;
 
 #[tokio::main]
