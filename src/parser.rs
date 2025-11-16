@@ -15,10 +15,16 @@ where
         b':' => parse_integer(stream).await,
         b'$' => parse_bulk_string(stream).await,
         b'*' => Box::pin(parse_array(stream)).await,
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Unkown RESP frame prefix",
-        )),
+        _ => {
+            println!(
+                "[parser] Received unkown prefix: {} (char : {})",
+                prefix, prefix as char
+            );
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Unkown RESP frame prefix",
+            ))
+        }
     }
 }
 
@@ -230,8 +236,8 @@ mod tests {
 
         assert!(result.is_ok());
         let frame = result.unwrap();
-        
-        let expected = RespFrame::Array(vec![]); 
+
+        let expected = RespFrame::Array(vec![]);
         assert_eq!(frame, expected);
     }
 
