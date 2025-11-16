@@ -1,4 +1,3 @@
-
 use tokio::io::BufReader;
 
 mod parser;
@@ -9,7 +8,6 @@ async fn main() {
     let mock_data = b"+OK\r\n:1000\r\n-Error message\r\n";
     let mut reader = BufReader::new(&mock_data[..]);
 
-    // 3. Call the function using its module name: `parser::`
 
     println!("Parsing 'OK'...");
     let frame1 = parser::parse_frame(&mut reader).await.unwrap();
