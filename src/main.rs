@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::result;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -82,16 +81,11 @@ async fn handle_connection(stream: TcpStream, db: Db) {
     println!("Client disconnected: {:?}", write_half.peer_addr());
 }
 
-fn handle_increment(args: Vec<RespFrame>, db: Db, amount: i64) -> RespFrame {
-    if args.len() != 2 {
-        return RespFrame::Error("ERR wrong number of arguments".to_string());
-    }
-    let RespFrame::BulkString(key) = &args[1] else {
-        return RespFrame::Error("ERR key is not a BulkString".to_string());
-    };
-
-    let mut db_guard = db.lock().unwrap();
-
+fn handle_increment(
+    key: &Bytes,
+    db_guard: &mut HashMap<Bytes, RedisValue>,
+    amount: i64,
+) -> Result<i64, RespFrame> {
     let value_struct = db_guard.entry(key.clone()).or_insert_with(|| RedisValue {
         data: Bytes::from_static(b"0"),
         expires_at: None,
@@ -103,18 +97,25 @@ fn handle_increment(args: Vec<RespFrame>, db: Db, amount: i64) -> RespFrame {
     }
 
     let Ok(data_str) = std::str::from_utf8(&value_struct.data) else {
-        return RespFrame::Error("ERR value is not valid UTF-8".to_string());
+        return Err(RespFrame::Error("ERR value is not valid UTF-8".to_string()));
     };
 
     let Ok(current_val) = data_str.parse::<i64>() else {
-        return RespFrame::Error("ERR value is not an integer".to_string());
+        return Err(RespFrame::Error("ERR value is not an integer".to_string()));
     };
 
-    let new_val = current_val.saturating_add(amount);
+    let new_val = match current_val.checked_add(amount) {
+        Some(val) => val,
+        None => {
+            return Err(RespFrame::Error(
+                "ERR increment or decrement would overflow".to_string(),
+            ));
+        }
+    };
 
     value_struct.data = Bytes::from(new_val.to_string());
 
-    RespFrame::Integer(new_val)
+    Ok(new_val)
 }
 
 // https://redis.io/docs/latest/develop/reference/protocol-spec/#client-handshake
@@ -315,8 +316,94 @@ fn handle_command(frame: RespFrame, db: Db) -> RespFrame {
                 None => RespFrame::Integer(-2),
             }
         }
-        "INCR" => handle_increment(args, db, 1),
-        "DECR" => handle_increment(args, db, -1),
+        "INCR" => {
+            if args.len() != 2 {
+                return RespFrame::Error("ERR wrong numberof arguments for 'incr".to_string());
+            }
+            let RespFrame::BulkString(key) = &args[1] else {
+                return RespFrame::Error("ERR key is not a bulkstring".to_string());
+            };
+
+            let mut db_guard = db.lock().unwrap();
+            match handle_increment(key, &mut db_guard, 1) {
+                Ok(new_val) => RespFrame::Integer(new_val),
+                Err(e) => e,
+            }
+        }
+
+        "DECR" => {
+            if args.len() != 2 {
+                return RespFrame::Error("ERR wrong numberof arguments for 'incr".to_string());
+            }
+            let RespFrame::BulkString(key) = &args[1] else {
+                return RespFrame::Error("ERR key is not a bulkstring".to_string());
+            };
+
+            let mut db_guard = db.lock().unwrap();
+            match handle_increment(key, &mut db_guard, -1) {
+                Ok(new_val) => RespFrame::Integer(new_val),
+                Err(e) => e,
+            }
+        }
+
+        "INCRBY" => {
+            if args.len() != 3 {
+                return RespFrame::Error(
+                    "ERR wrong number of arguments for 'incrby' command".to_string(),
+                );
+            }
+            let RespFrame::BulkString(key) = &args[1] else {
+                return RespFrame::Error("ERR key is not a BulkString".to_string());
+            };
+            let RespFrame::BulkString(amount_bytes) = &args[2] else {
+                return RespFrame::Error("ERR increment is not a BulkString".to_string());
+            };
+
+            let Ok(amount_str) = std::str::from_utf8(amount_bytes) else {
+                return RespFrame::Error("ERR increment is not valid UTF-8".to_string());
+            };
+            let Ok(amount) = amount_str.parse::<i64>() else {
+                return RespFrame::Error("ERR increment is not an integer".to_string());
+            };
+
+            let mut db_guard = db.lock().unwrap();
+            match handle_increment(key, &mut db_guard, amount) {
+                Ok(new_val) => RespFrame::Integer(new_val),
+                Err(e) => e,
+            }
+        }
+
+        "DECRBY" => {
+            if args.len() != 3 {
+                return RespFrame::Error(
+                    "ERR wrong number of arguments for 'incrby' command".to_string(),
+                );
+            }
+            let RespFrame::BulkString(key) = &args[1] else {
+                return RespFrame::Error("ERR key is not a BulkString".to_string());
+            };
+            let RespFrame::BulkString(amount_bytes) = &args[2] else {
+                return RespFrame::Error("ERR increment is not a BulkString".to_string());
+            };
+
+            let Ok(amount_str) = std::str::from_utf8(amount_bytes) else {
+                return RespFrame::Error("ERR increment is not valid UTF-8".to_string());
+            };
+            let Ok(amount) = amount_str.parse::<i64>() else {
+                return RespFrame::Error("ERR increment is not an integer".to_string());
+            };
+
+            let Some(neg_amount) = amount.checked_neg() else {
+                return RespFrame::Error("ERR decrement would overflow".to_string());
+            };
+
+            let mut db_guard = db.lock().unwrap();
+            match handle_increment(key, &mut db_guard, neg_amount) {
+                Ok(new_val) => RespFrame::Integer(new_val),
+                Err(e) => e,
+            }
+        }
+
         "KEYS" => {
             if args.len() != 2 {
                 return RespFrame::Error(
@@ -434,7 +521,7 @@ fn handle_command(frame: RespFrame, db: Db) -> RespFrame {
                 None => RespFrame::Integer(0),
             }
         }
-        "STRLEN" => {
+        "APPEND" => {
             if args.len() != 3 {
                 return RespFrame::Error("ERR wrong number of arguments for 'append' ".to_string());
             }
@@ -499,6 +586,7 @@ fn handle_command(frame: RespFrame, db: Db) -> RespFrame {
                 None => RespFrame::Null,
             }
         }
+
         _ => RespFrame::Error(format!("ERR unknown command '{}'", command_name)),
     }
 }
